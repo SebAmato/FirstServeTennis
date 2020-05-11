@@ -1,0 +1,958 @@
+---
+title: "First Serve Importance For the Big 3"
+author: "Sebastien Amato"
+date: "12/14/2019"
+output: 
+   prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE, echo=FALSE}
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(modelr)
+library(reshape2)
+library(nnet)
+library(powerMediation)
+library(knitr)
+library(stargazer)
+library(broom)
+```
+
+
+> Here we want to compare the three best players of all time. We will be using data from the ATP (Association of Tennis Professionals) from 2000 to 2016 and filter down to **Roger Feder, Rafael Nadal** and **Novak Djokovic**.   
+To start a point in tennis, a player has to serve, and gets two chances. The first serve is to be used as weapon, usually a riskier, harder shot. The second serve is more of a safety play.   
+Tennis common wisdom suggests that first serve percentage is one of the most important aspects of the game.   
+Since first serve is a weapon, the higher the percentage the better.     
+I have been playing tennis for over twenty years now and I want to confirm what I have always been told:
+
+**Does serve really infleunce the final result of a game. **
+
+>To answer this question, I will use data of the three best tennis players of all time, which happen to be playing over the same time period. 
+
+# Data Loading and wrangling:
+
+### Loading all data sets: 
+ 
+```{r warning=FALSE, include=FALSE}
+atp00 <- read_csv("atp_matches_2000.csv")
+atp01 <- read_csv("atp_matches_2001.csv")
+atp02 <- read_csv("atp_matches_2002.csv")
+atp03 <- read_csv("atp_matches_2003.csv")
+atp04 <- read_csv("atp_matches_2004.csv")
+atp05 <- read_csv("atp_matches_2005.csv")
+atp06 <- read_csv("atp_matches_2006.csv")
+atp07 <- read_csv("atp_matches_2007.csv")
+atp08 <- read_csv("atp_matches_2008.csv")
+atp09 <- read_csv("atp_matches_2009.csv")
+atp10 <- read_csv("atp_matches_2010.csv")
+atp11 <- read_csv("atp_matches_2011.csv")
+atp12 <- read_csv("atp_matches_2012.csv")
+atp13 <- read_csv("atp_matches_2013.csv")
+atp14 <- read_csv("atp_matches_2014.csv")
+atp15 <- read_csv("atp_matches_2015.csv")
+atp16 <- read_csv("atp_matches_2016.csv")
+
+atp_data <- rbind(atp00, atp01, atp02, atp03, atp04, atp05, atp06, atp07, atp08, atp09, atp10, atp11, atp12, atp13, atp14, atp15,atp16) %>% 
+  mutate(year = str_sub(tourney_id, 1, 4)) %>%
+  arrange(year)
+```
+
+
+### Getting the three players we want to compare 
+
+```{r}
+atp_goats <- atp_data %>%
+  filter(winner_name %in% c("Roger Federer", "Novak Djokovic", "Rafael Nadal") | loser_name %in% c("Roger Federer", "Novak Djokovic", "Rafael Nadal"))
+
+
+atp_goats$tourney_date <- ymd(atp_goats$tourney_date)
+```
+
+
+
+# Victory comparison: 
+
+> **We can first look at their overall performance --> their yearly winning frequency: how many matches per year did each of them win over their career: **
+
+```{r}
+vic_freq <- atp_goats %>% 
+  filter(winner_name %in% c("Rafael Nadal", "Novak Djokovic", "Roger Federer")) %>% 
+  group_by(year, winner_name) %>% 
+  summarise(count = n())
+
+avg_win <- vic_freq %>% 
+  group_by(winner_name) %>%
+  summarise(total_win = round(mean(count), 2))
+
+
+vic_freq %>% 
+  ungroup() %>% 
+  complete(year, winner_name, fill = list(count = 0)) %>% 
+  filter((winner_name == "Roger Federer" & year >= 1999) | (winner_name == "Rafael Nadal" & year >= 2003) | (winner_name == "Novak Djokovic" & year >= 2005)) %>% 
+  ggplot(aes(x= year, y= count, group = winner_name, color = winner_name))+
+  geom_line(size = 1.2)+
+  geom_point(size = 2)+
+  facet_wrap(~ winner_name, nrow = 3)+
+  geom_hline(data = avg_win, aes(yintercept = total_win), linetype = "dashed", color = "black")+
+  geom_text(data = avg_win, aes(x = 2.5, y= 110, label = "Avg Win/per year:"), color = 'black')+
+  geom_text(data = avg_win, aes(x = 2, y = 90, label = total_win), color = 'black')+
+  theme_classic()+
+  theme(legend.position = 'none')
+```
+
+
+> The visualization shows the number of wins per year for each of the three players as well as the average win per year overall their careers.  
+Djokovic and Nadal being younger, they started their career later than Federer. Which is why the the green and the red lines start respectively in 2005 and 2003.   
+One of the most important shot in tennis is the serve, and especially the first one. Let's compare the 
+each of the players serves and the effect it has ont their victory ratio. 
+
+# Federer First Serve Analysis
+
+-  **H0:** Serve has no onfluence on the final outcome of a tennis match   
+- **H1:** Serve has an onfluence on the final outcome of a tennis match 
+
+> **Let's see if there is a significant difference  of average first serve in when Federer wins or loses: **
+
+
+```{r, include= FALSE}
+atp_rf <- atp_data %>% 
+  filter(winner_name %in% "Roger Federer" | loser_name %in% "Roger Federer")
+
+
+atp_rf["win_loss"] = ifelse(atp_rf$winner_name %in% "Roger Federer", 1, 0)
+
+atp_rf["1stIn"] = ifelse(atp_rf$winner_name %in% 'Roger Federer', atp_rf$w_1stIn/atp_rf$w_svpt, atp_rf$l_1stIn/atp_rf$l_svpt)
+
+atp_rf %>% 
+  group_by(win_loss) %>% 
+  summarise(avg_1stIn = mean(`1stIn`, na.rm = TRUE))
+
+atp_rf["avg_1st_win"]= ifelse(atp_rf$winner_name %in% "Roger Federer", atp_rf$w_1stIn/atp_rf$w_svpt, NA)
+atp_rf["avg_1st_loss"]= ifelse(atp_rf$loser_name %in% "Roger Federer", atp_rf$l_1stIn/atp_rf$l_svpt, NA)
+```
+
+                              
+> After filtering the data for Roger Federer only and creating features for average first serve in when Roger Federer wins and when he loses, we will conduct a t-test between these two features
+
+## T-test:
+```{r}
+rf_t_test <- t.test(`1stIn` ~ win_loss, data = atp_rf)
+rf_t_test
+```
+
+
+The t-test shows that the average of first serve when Federer wins and when he loses is significantly different. When he wins, **62.70%** of his first serves are in. When he loses he only serves **59.84%** of his first serves in. 
+
+> **Let's look at the relationship between his first serve percentage and victory with a logisitc regression: **
+
+## Logistic Regression:
+```{r}
+log_model <- glm(win_loss ~ `1stIn`, data = atp_rf, family = binomial)
+summary(log_model)
+exp(log_model$coefficients)
+```
+
+
+> This logistic regression shows how important average first serve in Federer's game. However the intercept is not very meaningful as it is extremely unlikely to have 0% percent of first serve in during a complete match. We therefore need to **center the data.** 
+
+## Centered Logisitc Regression: 
+
+```{r}
+log_centered_model <- atp_rf %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+
+summary(log_centered_model)
+
+exp(log_centered_model$coefficients)
+
+```
+
+> The intercept here makes a lot more sense as Federer has a highly positive win/loss ratio. The intercept had to be positive. It  gives a better representation of the likely outcome of a game if the average first serve in a match is low.
+
+> **Let's look at the power of our model: **
+
+### Power Analysis
+
+```{r}
+atp_rf <- atp_rf %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE))
+atp_rf <- drop_na(atp_rf, centered_1stIn)
+
+rf_n = 1233
+
+rf_p1 = exp(1.60727)/(1+exp(1.60727))
+rf_OR = exp(6.37889)
+
+rf_power <- powerLogisticCon(n = rf_n, p1 = rf_p1, OR = rf_OR, alpha = 0.05 )
+
+rf_power
+
+```
+
+
+> The power analysis shows a power of 1, meaning that our model is less likely to make mistakes in the predictions
+
+
+## Visualization: 
+
+> **Relationship between Average first serve and victory:**
+
+```{r}
+rf_avg_1st_year <- atp_rf %>% 
+  group_by(year) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+
+rf_career_avg_1st = mean(rf_avg_1st_year$avg_1stin)
+
+
+rf_avg_win_year <-  atp_rf %>% 
+  group_by(year) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+rf_avg_1st_year["wins"] = rf_avg_win_year$count
+
+rf_avg_1st_year %>% 
+  filter(year < 2016) %>% 
+  ggplot(aes(x = wins, y = avg_1stin))+
+  geom_smooth(se = FALSE, color = "dark red")+
+  geom_point(color = 'dark green')+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+>Removing 2016 because Federer was injured and did not play half of the season, we see that the overall relationship is positive which confirms our model's results.     
+Individuals familiar with the game also know that court surface influences many factors. Usefulness of serve is one of them. To look at the effect of surface on the relationship between average first serve and victory, we can use a mixed model with *surface* as level to see its importance. 
+
+
+
+
+## Mixed Model: 
+
+- **H0:** Court Surface has no influence on the usefulness of serve 
+- **H1:** Court surface has some importance on the usefulness of the serve. 
+
+```{r}
+rf_log_surface__model <- atp_rf %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  lme4::glmer(win_loss ~ centered_1stIn + (1| surface), data = ., family = binomial)
+
+summary(rf_log_surface__model)
+
+```
+
+The mixed model shows that surface **does** have an effect on the usefulness of serve to win a match for Roger Federer. Let us have look at the residuals of both of our models to see which one fits the best. 
+   
+```{r}
+rf_mixed <- predict(rf_log_surface__model)
+rf_slim <- predict(log_centered_model)
+
+
+allpred <- cbind(actual = atp_rf$win_loss,
+                 mixed = rf_mixed,
+                 slim = rf_slim)
+
+head(allpred, 20)
+```
+
+
+> Taking a quick look at the predictions, the mixed model seems to give more accurate results than the simple model. It is complicated to visualize since the dependent variable is binary. 
+
+> **Let's investigate what effect each court surface has on first serve percentage importance to win a match. Tennis common wisdom suggests that clay reduces the important of serve. **
+
+> Let's filter the data for each surface and run logistic regressions to have a more precise idea on what surface decreases or increases the importance of serve (since carpet does no longer exist, let's only look at clay, grass and hard court).
+
+> After filtering the data for each surface, we ran logistic regressions:
+
+## Court Surface Analysis: 
+
+- **H0:** There is no difference between court surface regarding the relationship between average first serve and victory
+- **H1:** There is a difference between court surface regarding the relationship between average first serve and victory
+
+### Clay Logistic Regression: 
+
+```{r}
+atp_rf_clay <- atp_rf %>% 
+  filter(surface == "Clay")
+
+rf_clay <- atp_rf_clay %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rf_clay)
+
+exp(rf_clay$coefficients)
+```
+
+### Hard court Logistic Regression: 
+
+```{r}
+atp_rf_hard <- atp_rf %>% 
+  filter(surface == "Hard")
+
+rf_hard <- atp_rf_hard %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rf_hard)
+exp(rf_hard$coefficients)
+```
+
+### Grass Logistic Regression: 
+
+```{r}
+atp_rf_grass <- atp_rf %>% 
+  filter(surface == "Grass")
+
+
+rf_grass <- atp_rf_grass %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rf_grass)
+exp(rf_grass$coefficients)
+```
+
+### Court surface Analysis overview: 
+
+
+```{r}
+coefs <- matrix(c(round(rf_clay$coefficients["(Intercept)"], 2),
+                     round(rf_hard$coefficients["(Intercept)"], 2),
+                     round(rf_grass$coefficients["(Intercept)"], 2),
+                     round(rf_clay$coefficients["centered_1stIn"], 2),
+                     round(rf_hard$coefficients["centered_1stIn"], 2),
+                     round(rf_grass$coefficients["centered_1stIn"],2)), 
+                   nrow = 3, ncol = 2)
+
+rownames(coefs) <- c("Clay", "Hard", "Grass")
+colnames(coefs) <- c("Intercept", "Avg First Serve")
+surfaces <- c("Clay", "Hard", "Grass")
+
+rf_coef_table <- as_tibble(coefs)
+DT::datatable(rf_coef_table, rownames = surfaces)
+
+```
+
+> The coefficients and intercepts of the three models show clear differences, which confirms what the mixed model's results showed.
+
+## Visualizations: 
+
+### Table : First serve percentage and win per year per surface:
+
+```{r}
+rf_surface <- atp_rf %>% 
+  group_by(year, surface) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+rf_surface_names <- c("Year", "Surface", "Avg First Serve", "Victory Count")
+rf_surface <- rf_surface %>% 
+  filter(surface != "Carpet")
+rf_win_surface<-  atp_rf %>% 
+  group_by(year, surface) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+rf_win_surface <- rf_win_surface %>% 
+  filter(surface != "Carpet")
+
+rf_surface["wins"] = rf_win_surface$count
+
+
+
+DT::datatable(rf_surface, colnames = rf_surface_names)
+```
+
+> ** Let's visualize what the table displays:**
+
+
+### Line Graph: Average First Serve vs. Wins Per Year by surface
+
+```{r}
+ggplot(rf_surface, aes(x = wins, y = avg_1stin))+
+  geom_smooth(method = "lm", color = "dark red", se = FALSE, size = 1.2)+
+  geom_point(color = 'dark green', size = 2)+
+  facet_wrap(~ surface, nrow = 3)+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+
+>The visualizations confirms what the models showed. Even though the number of matches is not the same for each surface, 
+the slope of the lines confirms what tennis common wisdom suggests: Clay being the slowest surface, the importance of serve is minimal compared to the two other surfaces. Grass is the fastest court surface which explains the steeper curve.     
+Hard courts are in the middle of clay and grass in terms of speed. The slope of the line shows a positive relationship, however not as important as the one for grass. The slope and intercept of these curves coincide with the intercept and coefficient of each model. 
+
+> We can conclude from this that overall, first serve percentage is extremely important when it comes to the outcome of a match for Federer. When we are to look at the effect of surface has on the importance of first serve percentage, we see that clay clearly decreases the influence of serve on the outcome of a match. On the other hand, grass drastically increases the importance of serve in a match. 
+
+
+# Rafael Nadal First Serve Analysis 
+
+> Rafael Nadal is known as being more of defender than Roger Federer. It is also known that first serve is one of Federer's biggest weapon. It is not so much the case for Nadal. We expect the results to show a less important relationship between first serve percentage and match outcome. Let's run the same models for Rafael Nadal and compare the results: 
+
+
+-  **H0:** Serve has no onfluence on the final outcome of a tennis match   
+- **H1:** Serve has an onfluence on the final outcome of a tennis match 
+
+> **Let's see if there is a significant difference of average first serve in when Nadal wins or loses: **
+
+
+```{r, include= FALSE}
+atp_rn <- atp_data %>% 
+  filter(winner_name %in% "Rafael Nadal" | loser_name %in% "Rafael Nadal")
+
+
+atp_rn["win_loss"] = ifelse(atp_rn$winner_name %in% "Rafael Nadal", 1, 0)
+
+atp_rn["1stIn"] = ifelse(atp_rn$winner_name %in% 'Rafael Nadal', atp_rn$w_1stIn/atp_rn$w_svpt, atp_rn$l_1stIn/atp_rn$l_svpt)
+
+atp_rn %>% 
+  group_by(win_loss) %>% 
+  summarise(avg_1stIn = mean(`1stIn`, na.rm = TRUE))
+
+atp_rn["avg_1st_win"]= ifelse(atp_rn$winner_name %in% "Rafael Nadal", atp_rn$w_1stIn/atp_rn$w_svpt, NA)
+atp_rn["avg_1st_loss"]= ifelse(atp_rn$loser_name %in% "Rafael Nadal", atp_rn$l_1stIn/atp_rn$l_svpt, NA)
+```
+
+                              
+> After filtering the data for Rafael Nadal only and creating features for average first serve in when Rafael Nadal wins and when he loses, we will conduct a t-test between these two features
+
+## T-test:
+```{r}
+rn_t_test <- t.test(`1stIn` ~ win_loss, data = atp_rn)
+rn_t_test
+```
+
+
+> Unlike Roger Federer, there is no significant difference in average first serve when Nadal win or loses matches. Regardless of the outcome of the match, Nadal's first serve average is between **68.26%** and **68.62%**.
+
+> **Let's look at the relationship between his first serve percentage and victory with a logisitc regression: **
+*(Let's skip the not centered logistic regression step)*
+
+## Centered Logisitc Regression: 
+
+```{r}
+rn_log_centered_model <- atp_rn %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+
+summary(rn_log_centered_model)
+
+exp(rn_log_centered_model$coefficients)
+
+```
+
+> As expected, first serve percentage does not have the same importance for Nadal than for Federer. The coefficient is not significant and a lot lower than Federer's first serve percentage coefficient. 
+The intercepts do not differ very much **`r log_centered_model$coefficients["centered_1stIn"] `** for Federer and **`r rn_log_centered_model$coefficient["centered_1stIn"]`** for Nadal. 
+
+
+> **Let's look at the power of our model: **
+
+### Power Analysis
+
+```{r}
+atp_rn <- atp_rn %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE))
+atp_rn <- drop_na(atp_rn, centered_1stIn)
+
+rn_n = 991
+
+rn_p1 = exp(1.51775)/(1+exp(1.51775))
+rn_OR = exp(0.71258)
+
+rn_power <- powerLogisticCon(n = rn_n, p1 = rn_p1, OR = rn_OR, alpha = 0.05 )
+
+rn_power
+
+```
+
+
+> The power analysis shows a power of 1, meaning that our model is less likely to make mistakes in the predictions
+
+
+## Visualization: 
+
+> **Relationship between Average first serve and victory:**
+
+```{r}
+rn_avg_1st_year <- atp_rn %>% 
+  group_by(year) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+
+rn_career_avg_1st = mean(rn_avg_1st_year$avg_1stin)
+
+
+rn_avg_win_year <-  atp_rn %>% 
+  group_by(year) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+rn_avg_1st_year["wins"] = rn_avg_win_year$count
+
+rn_avg_1st_year %>% 
+  filter(year > 2003) %>% 
+  ggplot(aes(x = wins, y = avg_1stin))+
+  geom_smooth(se = FALSE, color = "dark red")+
+  geom_point(color = 'dark green')+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+> Removing 2002 and 2003, the two first years of Nadal's career where he played less than 20 matches, we see that overall, there is no clear relationship between average first serve and the number fo wins per year, which confirms our model's results. 
+
+> ** Let's conduct the court surface analysis for Nadal:**
+
+> Nadal is recognized as the best clay player of all time. As defender, he is advantaged on slower surfaces. As one of the best overall player of all time, he also has good results on grass and hard court. Let us look at the numbers: 
+
+## Mixed Model: 
+
+- **H0:** Court Surface has no influence on the usefulness of serve 
+- **H1:** Court surface has some importance on the usefulness of the serve. 
+
+```{r}
+rn_log_surface__model <- atp_rn %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  lme4::glmer(win_loss ~ centered_1stIn + (1| surface), data = ., family = binomial)
+
+summary(rn_log_surface__model)
+```
+
+> The effect of surface on Nadal's relationship between serve and victory is **more important** than for Federer. Again, even though both the coefficient and the intercept are insignificant, the effect of surface is 1.061 while Federer's was 0.12. This suggests that Nadal tends to adapt his serve to the surface he plays on. 
+
+> **Let's investigate what effect each court surface has on first serve percentage importance to win a match. Tennis common wisdom suggests that clay reduces the important of serve. **
+
+>As we did for Federer, let's filter the data for each surface and run logistic regressions to have a more precise idea on what surface decreases or increases the importance of first serve percentage on match outcome. 
+
+**After ffiltering th data for each surface, we ran logistic regressions:**
+
+## Court Surface Analysis: 
+
+- **H0:** There is no difference between court surface regarding the relationship between average first serve and victory
+- **H1:** There is a difference between court surface regarding the relationship between average first serve and victory
+
+### Clay Logistic Regression: 
+
+```{r}
+atp_rn_clay <- atp_rn %>% 
+  filter(surface == "Clay")
+
+rn_clay <- atp_rn_clay %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rn_clay)
+
+exp(rn_clay$coefficients)
+```
+
+### Hard court Logistic Regression: 
+
+```{r}
+atp_rn_hard <- atp_rn %>% 
+  filter(surface == "Hard")
+
+rn_hard <- atp_rn_hard %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rn_hard)
+exp(rn_hard$coefficients)
+```
+
+### Grass Logistic Regression: 
+
+```{r}
+atp_rn_grass <- atp_rn %>% 
+  filter(surface == "Grass")
+
+
+rn_grass <- atp_rn_grass %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(rn_grass)
+exp(rn_grass$coefficients)
+```
+
+
+### Court Analysis overview:
+
+```{r}
+rn_coefs <- matrix(c(round(rn_clay$coefficients["(Intercept)"], 2),
+                     round(rn_hard$coefficients["(Intercept)"], 2),
+                     round(rn_grass$coefficients["(Intercept)"], 2),
+                     round(rn_clay$coefficients["centered_1stIn"], 2),
+                     round(rn_hard$coefficients["centered_1stIn"], 2),
+                     round(rn_grass$coefficients["centered_1stIn"],2)), 
+                   nrow = 3, ncol = 2)
+
+rownames(rn_coefs) <- c("Clay", "Hard", "Grass")
+colnames(rn_coefs) <- c("Intercept", "Avg First Serve")
+rn_surfaces <- c("Clay", "Hard", "Grass")
+
+rn_coef_table <- as_tibble(rn_coefs)
+DT::datatable(rn_coef_table, rownames = surfaces)
+
+```
+
+> For all the regressions, coefficients were not significant. However, it is worth looking at them still and compare them to Federer's. Federer had for the three surfaces high posotive coefficients. Nadal on the other hand has not only low but negative coefficients for all surfaces. It confirms that first serve percentage is not as important for Nadal than for Federer. 
+
+## Visualizations: 
+
+### Table : First serve percentage and win per year per surface:
+
+```{r}
+rn_surface <- atp_rn %>% 
+  group_by(year, surface) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+
+rn_surface_names <- c("Year", "Surface", "Avg First Serve", "Victory Count")
+
+rn_surface <- rn_surface %>% 
+  filter(surface != "Carpet")
+
+rn_win_surface<-  atp_rn %>% 
+  group_by(year, surface) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+
+rn_win_surface <- rn_win_surface %>% 
+  filter(surface != "Carpet")
+
+
+rn_surface = inner_join(rn_surface, rn_win_surface, by = c("year", "surface"))
+
+
+
+DT::datatable(rn_surface, colnames = rn_surface_names)
+```
+
+> ** Let's visualize what the table displays:**
+
+
+### Line Graph: Average First Serve vs. Wins Per Year by surface
+
+```{r}
+ggplot(rn_surface, aes(x = count, y = avg_1stin))+
+  geom_smooth(method = "lm", color = "dark red", se = FALSE, size = 1.2)+
+  geom_point(color = 'dark green', size = 2)+
+  facet_wrap(~ surface, nrow = 3)+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+> The graphs confirm what the models showed: for Nadal, first serve percentage is not as important as for Federer. Since Nadal's serve is not as efficient as Federer's, it makes sense that it does not have such a important effect the outcome of his matches. 
+Except for grass, all relationships seem to be negative which is counter intuitive. Regardless of the style of player, a high percentage of first serve is always helpful. 
+
+> A qualitative explaination could be that since Nadal has amazing stats on longer rallies, shorter rallies do not advantage him at all, therefore, when his first serve percentage increases, it decreases the length of rallies which does not play in his favor. 
+
+> **Let's look at the relationship between match length and first serve percentage: **  
+*(Assuming that match lengths partly accounts for rally lengths)*
+
+```{r}
+ggplot(atp_rn, aes(x = minutes, y= `1stIn`)) +
+  geom_point()+
+  geom_smooth()
+```
+
+> There seems to be no relationship between first serve percentage and match length. With the available data, there is therefore no way to figure out the reasons for which there is no relationship between first serve percentage and match outcome for Nadal as first serve percentage is assumed to be one of the most important aspect of the game.   
+We could argue that Nadal's best weapons differ from Federer's best weapons. 
+
+
+> We can conclude that overall, first serve percentage is not as important for Nadal to win as it is for Federer. Indeed, all the models and visualizations show that there is no significant difference between Nadal's first serve percentage when he wins and when he loses. Models and visualizations also show no significant relationship between Nadal's first serve percentage and his match outcome. 
+
+
+# Novak Djokovic First Serve Analysis 
+
+> Novak Djokovic is known as being the most consistent player on the tour. His serve is an important weapon of his game. We expect to find results that will lie between Federer's and Nadal's as his playing style is more offensive than Nadal, but not as offensive as Federer:
+
+-  **H0:** Serve has no influence on the final outcome of a tennis match   
+- **H1:** Serve has an influence on the final outcome of a tennis match 
+
+> **Let's see if there is a significant difference  of average first serve in when Djokovic wins or loses: **
+
+
+```{r, include= FALSE}
+atp_nd <- atp_data %>% 
+  filter(winner_name %in% "Novak Djokovic" | loser_name %in% "Novak Djokovic")
+
+
+atp_nd["win_loss"] = ifelse(atp_nd$winner_name %in% "Novak Djokovic", 1, 0)
+
+atp_nd["1stIn"] = ifelse(atp_nd$winner_name %in% 'Novak Djokovic', atp_nd$w_1stIn/atp_nd$w_svpt, atp_nd$l_1stIn/atp_nd$l_svpt)
+
+atp_nd %>% 
+  group_by(win_loss) %>% 
+  summarise(avg_1stIn = mean(`1stIn`, na.rm = TRUE))
+
+atp_nd["avg_1st_win"]= ifelse(atp_nd$winner_name %in% "Novak Djokovic", atp_nd$w_1stIn/atp_nd$w_svpt, NA)
+atp_nd["avg_1st_loss"]= ifelse(atp_nd$loser_name %in% "Novak Djokovic", atp_nd$l_1stIn/atp_nd$l_svpt, NA)
+```
+
+                              
+> After filtering the data for Novak Djokovic only and creating features for average first serve in when Novak Djokovic wins and when he loses, we will conduct a t-test between these two features
+
+## T-test:
+```{r}
+nd_t_test <- t.test(`1stIn` ~ win_loss, data = atp_nd)
+nd_t_test
+```
+
+> There is a significant difference between first serve percentage when Djokovic wins and when he loses. As expected the difference between the two groups is higher than for Nadal, but lower than for Federer. When he loses, his average first serve percentage is **63.11%**. When he wins, it is **65.18%**.   
+ **Let's look at the relationship between his first serve percentage and victory with a logisitc regression: **
+(*Let's skip the not centered logistic regression step)
+
+## Centered Logisitc Regression: 
+
+```{r}
+nd_log_centered_model <- atp_nd %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+
+summary(nd_log_centered_model)
+
+exp(nd_log_centered_model$coefficients)
+
+```
+
+> Djokovic's coefficient for first serve percentage coefficient is fairly high and between Nadal and Federer. 
+Both the intercept and the coefficient are significant. We can therefore assume that there is a strong relationship between Djokovic's first serve percentage in a match, and the outcome of that match.   
+The intercept is higher than Federer's and Nadal's : `r log_centered_model$coefficients["centered_1stIn"] ` for Federer, `r rn_log_centered_model$coefficient["centered_1stIn"]` for Nadal and `r nd_log_centered_model$coefficient["centered_1stIn"]` for Djokovic.
+
+> **Let's look at the power of our model: **
+
+### Power Analysis
+
+```{r}
+atp_nd <- atp_nd %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE))
+atp_nd <- drop_na(atp_nd, centered_1stIn)
+
+nd_n = 917
+
+nd_p1 = exp(1.63713)/(1+exp(1.63713))
+nd_OR = exp(5.44735)
+
+nd_power <- powerLogisticCon(n = nd_n, p1 = nd_p1, OR = nd_OR, alpha = 0.05 )
+
+nd_power
+
+```
+
+
+> The power analysis shows a power of 1, meaning that our model is less likely to make mistakes in the predictions
+
+
+## Visualization: 
+
+> **Relationship between Average first serve and victory:**
+
+```{r}
+nd_avg_1st_year <- atp_nd %>% 
+  group_by(year) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+
+nd_career_avg_1st = mean(nd_avg_1st_year$avg_1stin)
+
+
+nd_avg_win_year <-  atp_nd %>% 
+  group_by(year) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+nd_avg_1st_year["wins"] = nd_avg_win_year$count
+
+nd_avg_1st_year %>% 
+  ggplot(aes(x = wins, y = avg_1stin))+
+  geom_smooth(se = FALSE, color = "dark red")+
+  geom_point(color = 'dark green')+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+> For Djokovic, there is a clear relationship between first serve percentage and wins per year. This visualization confirms the results of the model. First serve percentage seems to be an important weapon in Djokovic's game. 
+
+> ** Let's conduct the surface analysis for Djokovic:**
+
+> Djokovic had his best results on hard court. However, as a very consistent player, we expect to find smaller differences between surfaces than for Federer.
+
+## Mixed Model: 
+
+- **H0:** Court Surface has no influence on the usefulness of serve 
+- **H1:** Court surface has some influence on the usefulness of the serve. 
+
+```{r}
+nd_log_surface__model <- atp_nd %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  lme4::glmer(win_loss ~ centered_1stIn + (1| surface), data = ., family = binomial)
+
+summary(nd_log_surface__model)
+```
+
+
+>As expected the standard deviation for surface is smaller than for Federer and Nadal. Djokovic's first serve percentage seems to have similar effect regardless of the court surface.   
+Since this model is significant let's compare the predictions with the single model. 
+
+   
+```{r}
+nd_mixed <- predict(nd_log_surface__model)
+nd_slim <- predict(nd_log_centered_model)
+
+
+nd_allpred <- cbind(actual = atp_nd$win_loss,
+                 mixed = nd_mixed,
+                 slim = nd_slim)
+
+head(nd_allpred, 20)
+```
+
+> Looking at the first twenty observations, the mixed model does not seem to make better predictions than the single model overall. 
+
+> **Let's investigate what effect each court surface has on first serve percentage importance to win a match. Tennis common wisdom suggests that clay reduces the important of serve. **
+
+Let's filter the data for each surface and run logistic regression to have a more precise idea on what surface decreases the importance of first serve percentage.
+
+After ffiltering th data for each surface, we ran logistic regressions:
+
+## Court Surface Analysis: 
+
+- **H0:** There is no difference between court surface regarding the relationship between average first serve and victory
+- **H1:** There is a difference between court surface regarding the relationship between average first serve and victory
+
+### Clay Logistic Regression: 
+
+```{r}
+atp_nd_clay <- atp_nd %>% 
+  filter(surface == "Clay")
+
+nd_clay <- atp_nd_clay %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(nd_clay)
+
+exp(nd_clay$coefficients)
+```
+
+### Hard court Logistic Regression: 
+
+```{r}
+atp_nd_hard <- atp_nd %>% 
+  filter(surface == "Hard")
+
+nd_hard <- atp_nd_hard %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(nd_hard)
+exp(nd_hard$coefficients)
+```
+
+### Grass Logistic Regression: 
+
+```{r}
+atp_nd_grass <- atp_nd %>% 
+  filter(surface == "Grass")
+
+
+nd_grass <- atp_nd_grass %>% 
+  mutate("centered_1stIn" = `1stIn` - mean(`1stIn`, na.rm = TRUE)) %>% 
+  glm(win_loss ~ centered_1stIn, data = ., family = binomial)
+summary(nd_grass)
+exp(nd_grass$coefficients)
+```
+
+
+### Court Analysis overview:
+
+```{r}
+nd_coefs <- matrix(c(round(nd_clay$coefficients["(Intercept)"], 2),
+                     round(nd_hard$coefficients["(Intercept)"], 2),
+                     round(nd_grass$coefficients["(Intercept)"], 2),
+                     round(nd_clay$coefficients["centered_1stIn"], 2),
+                     round(nd_hard$coefficients["centered_1stIn"], 2),
+                     round(nd_grass$coefficients["centered_1stIn"],2)), 
+                   nrow = 3, ncol = 2)
+
+rownames(nd_coefs) <- c("Clay", "Hard", "Grass")
+colnames(nd_coefs) <- c("Intercept", "Avg First Serve")
+surfaces <- c("Clay", "Hard", "Grass")
+
+nd_coef_table <- as_tibble(nd_coefs)
+DT::datatable(nd_coef_table, rownames = surfaces)
+
+```
+
+
+> For all the regressions, the coefficients are significant. As expected, the difference between the intercept and coefficients is not as big as for Federer and the coefficients are not as high. Although, similarly to Federer, Djokovic's serve is an important factor on all surfaces. 
+
+
+## Visualizations: 
+
+### Table : First serve percentage and win per year per surface:
+
+```{r}
+nd_surface <- atp_nd %>% 
+  group_by(year, surface) %>% 
+  summarise(avg_1stin = mean(`1stIn`, na.rm = TRUE))
+
+nd_surface_names <- c("Year", "Surface", "Avg First Serve", "Victory Count")
+
+nd_surface <- nd_surface %>% 
+  filter(surface != "Carpet")
+
+nd_win_surface<-  atp_nd %>% 
+  group_by(year, surface) %>%
+  filter(win_loss == 1) %>% 
+  summarise(count = n())
+
+
+nd_win_surface <- nd_win_surface %>% 
+  filter(surface != "Carpet")
+
+
+nd_surface = inner_join(nd_surface, nd_win_surface, by = c("year", "surface"))
+
+
+
+DT::datatable(nd_surface, colnames = nd_surface_names)
+```
+
+> ** Let's visualize what the table displays:**
+
+
+### Line Graph: Avg First Serve vs. Wins Per Year by surface
+
+```{r}
+ggplot(nd_surface, aes(x = count, y = avg_1stin))+
+  geom_smooth(method = "lm", color = "dark red", se = FALSE, size = 1.2)+
+  geom_point(color = 'dark green', size = 2)+
+  facet_wrap(~ surface, nrow = 3)+
+  theme_classic()+
+  ylab("Avg First Serve In (%)")+
+  xlab("Wins per Year")+
+  ggtitle("Avg First Serve In vs. Wins per Year")
+```
+
+> The graph confirms that serve is important for Djokovic's match outcome. Unlike the two other players, there is a positive relationship between first serve percentage and wins per year on all surfaces. As for Federer and Nadal, the slope of the the grass graph is steeper than the other ones which confirms that on faster court surfaces, serve is more important than on slower court surfaces. 
+
+
+
+# Conclusion: 
+
+
+- From the comparison of these three players, we can conclude that for two of them (Federer and Djokovic), what I have been told for the last twenty years about first serve percentage is true. For Djokovic and Federer, a higher first serve percentage increases the odds of winning a match. For Nadal, first serve percentage does not make a singificant difference on the probability of winning. First serve's percentage's importance on the odds of winning a match also depends on the court surface. The slower the surface, the least important first serve percentage is to win a match. Automatically, the faster the surface, the more important first serve percentage is. 
+
+- The importance of frist serve percentage also seems to vary depending on the playing style of players. It is intuitive to think that when players have a good first serve, they make more use of it. Therefore, the odds of winning depends more on first serve percentage. Serve being one of the pillars of Federer's game, it makes sense that first serve percentage has a higher influence on the odds of him winning. 
